@@ -25,9 +25,9 @@ int prompt(){
 
   cmd = strtok(line,"|");
 
-  while(cmd != NULL && 0){
+  while(cmd != NULL){
     pipe(fd);
-    // printf("cmd=%s\n",cmd);
+    printf("cmd=%s\n",cmd);
 
     // fork and assign childpid
     if((childpid = fork()) == -1)
@@ -41,10 +41,9 @@ int prompt(){
       dup2(fd[1],1); // child process move stdout to output side
       close(fd[1]);
 
-      // close(fd[1]);
       char str[] = "ok";
       write(fd[1], str, (strlen(str)+1));
-      status = execve(cmd, NULL, NULL);
+      // status = execve(cmd, NULL, NULL);
 
       exit(status);
       return 0;
@@ -60,14 +59,12 @@ int prompt(){
       }
       // close(fd[0]);
       int bytes = read(fd[0], readbuffer, sizeof(readbuffer));
-      printf("%d %s\n", bytes, cmd);
+      printf("%d\n", bytes);
     }
 
-    // wait
-    // output
-    // next pipe
-    // printf("%s\n", cmd);
+    printf("%s\n", cmd);
     cmd = strtok(NULL,"|");
+    break;
   }
   return 1;
 }
