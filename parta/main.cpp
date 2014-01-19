@@ -44,7 +44,7 @@ int prompt(){
       // close(fd[1]);
       char str[] = "ok";
       write(fd[1], str, (strlen(str)+1));
-      // status = execve(cmd, NULL, NULL);
+      status = execve(cmd, NULL, NULL);
 
       exit(status);
       return 0;
