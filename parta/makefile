@@ -1,2 +1,2 @@
 all:
-	gcc forkfork.c -o 550shell -lreadline
+	gcc main.c -o 550shell -lreadline
