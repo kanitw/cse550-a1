@@ -42,37 +42,32 @@ void * worker(void * ptr)
 
 	/* waiting for the network input */
 	//recv(conn->sock, buffer, MAXDATASIZE,0);
-	//buffer[strlen(buffer)] = '\0';
-	//printf("%s\n",buffer);
+	//conn->buffer[strlen(conn->buffer)-1] = '\0';
+	//printf("%d\n",strlen(conn->buffer));
 	
 	FILE *fp;
 	fp=fopen(conn->buffer, "r");
-	//**need to handle if file not exist
-
-
-	while( ( ch = fgetc(fp) ) != EOF ){
-		//**note:error might occur when reallocate
-		current_len++;
-		if(current_len >= current_size-10){
-			current_size*=2;
-			message = (char*)realloc(message, current_size * sizeof(char));
+	if(fp){
+		while( ( ch = fgetc(fp) ) != EOF ){
+			//**note:error might occur when reallocate
+			current_len++;
+			if(current_len >= current_size-10){
+				current_size*=2;
+				message = (char*)realloc(message, current_size * sizeof(char));
+			}
+			message[strlen(message)] = ch;
 		}
-		message[strlen(message)] = ch;
+
+		message[strlen(message)] = '\0';
+
+		fclose(fp);
+		free(conn);
+		return (void *) message;
+	}else{
+		free(conn);
+		return (void *) NULL;
 	}
 
-	message[strlen(message)] = '\0';
-	//printf("1: %s\n",message);
-	//send(conn->sock, message, current_size, 0);
-	//printf("2: %s\n",message);
-
-	//free(buffer);
-	//free(message);
-	fclose(fp);
-
-	/* close socket and clean up */
-	//close(conn->sock);
-	free(conn);
-	return (void *) message;
 	//pthread_exit(0);
 }
 
@@ -103,7 +98,6 @@ int main(int argc, char ** argv)
 	int port;
 	char host_address[80];
 	connection_t * connection;
-	//pthread_t thread;
 	struct pollfd ufds[1];
 	char buf1[MAXDATASIZE];
 	int rv;
@@ -178,7 +172,7 @@ int main(int argc, char ** argv)
 		    	addr_size = sizeof their_addr;
 		    	new_sock = accept(sock,(struct sockaddr *)&their_addr, &addr_size);
 		        recv(new_sock, buf1, sizeof buf1, 0); // receive normal data
-		        buf1[strlen(buf1)] = '\0';
+		        buf1[strlen(buf1)-1] = '\0';
 		        printf( "%s\n", buf1);
 		        
 		        connection = (connection_t *)malloc(sizeof(connection_t));
@@ -190,14 +184,16 @@ int main(int argc, char ** argv)
 				}
 				else
 				{
-					/* start a new thread but do not wait for it */
 					pthread_t thread;
 					void *file_content;
+					char *file_content_str;
 					pthread_create(&thread, 0, worker, (void *)connection);
 					pthread_join(thread, &file_content);
-					send(new_sock, (char*)file_content, MAXDATASIZE, 0);
+					if(file_content){
+						file_content_str = (char*)file_content;
+						send(new_sock, file_content_str, MAXDATASIZE, MSG_NOSIGNAL);
+					}
 					close(new_sock);
-					//pthread_detach(thread);
 				}
 
 		        
@@ -205,23 +201,7 @@ int main(int argc, char ** argv)
 
 		}
 	}
-	printf("%s\n", "done");
-	/*
-	while (1)
-	{
-	connection = (connection_t *)malloc(sizeof(connection_t));
-	connection->sock = accept(sock, &connection->address, &connection->addr_len);
-	if (connection->sock <= 0)
-	{
-		free(connection);
-	}
-	else
-	{
-		/ start a new thread but do not wait for it /
-		pthread_create(&thread, 0, worker, (void *)connection);
-		pthread_detach(thread);
-	}
-	}
-	*/
+	printf("%s\n", "end somehow");
+
 	return 0;
 }
