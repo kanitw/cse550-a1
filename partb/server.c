@@ -5,20 +5,23 @@
 #include <linux/in.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/fcntl.h>
+#include <sys/poll.h>
 
 #define MAXDATASIZE 100000
 
 typedef struct
 {
 	int sock;
-	struct sockaddr address;
-	int addr_len;
+	char *buffer;
+	//struct sockaddr address;
+	//int addr_len;
 } connection_t;
 
 void * worker(void * ptr)
 {
-	char *buffer;
-	buffer = (char *)malloc((MAXDATASIZE)*sizeof(char));
+	//char *buffer;
+	//buffer = (char *)malloc((MAXDATASIZE)*sizeof(char));
 	char ch;
 	char *message;
 	message = (char *)malloc((MAXDATASIZE)*sizeof(char));
@@ -26,6 +29,8 @@ void * worker(void * ptr)
 	int current_size = MAXDATASIZE;
 	connection_t * conn;
 	long addr = 0;
+	//sleep 5 seconds for testing
+	sleep(5);
 
 	if (!ptr) pthread_exit(0); 
 	conn = (connection_t *)ptr;
@@ -35,13 +40,15 @@ void * worker(void * ptr)
 
 	//buffer[len] = 0;
 
-	/* read message */
-	recv(conn->sock, buffer, MAXDATASIZE,0);
-	buffer[strlen(buffer)] = '\0';
-	printf("%s\n",buffer);
+	/* waiting for the network input */
+	//recv(conn->sock, buffer, MAXDATASIZE,0);
+	//buffer[strlen(buffer)] = '\0';
+	//printf("%s\n",buffer);
 	
 	FILE *fp;
-	fp=fopen(buffer, "r");
+	fp=fopen(conn->buffer, "r");
+	//**need to handle if file not exist
+
 
 	while( ( ch = fgetc(fp) ) != EOF ){
 		//**note:error might occur when reallocate
@@ -54,29 +61,52 @@ void * worker(void * ptr)
 	}
 
 	message[strlen(message)] = '\0';
-	printf("1: %s\n",message);
-	send(conn->sock, message, current_size, 0);
-	printf("2: %s\n",message);
+	//printf("1: %s\n",message);
+	//send(conn->sock, message, current_size, 0);
+	//printf("2: %s\n",message);
 
-	free(buffer);
-	free(message);
+	//free(buffer);
+	//free(message);
 	fclose(fp);
 
 	/* close socket and clean up */
-	close(conn->sock);
+	//close(conn->sock);
 	free(conn);
-	pthread_exit(0);
+	return (void *) message;
+	//pthread_exit(0);
+}
+
+/**
+ * Set a socket to non-blocking mode.
+ */
+int setnonblock(int fd)
+{
+	int flags;
+
+	flags = fcntl(fd, F_GETFL);
+	if (flags < 0)
+		return flags;
+	flags |= O_NONBLOCK;
+	if (fcntl(fd, F_SETFL, flags) < 0)
+		return -1;
+
+	return 0;
 }
 
 int main(int argc, char ** argv)
 {
 	int sock = -1;
+	int new_sock;
 	struct sockaddr_in address;
+	struct sockaddr_storage their_addr;
+	socklen_t addr_size;
 	int port;
 	char host_address[80];
 	connection_t * connection;
-	pthread_t thread;
-
+	//pthread_t thread;
+	struct pollfd ufds[1];
+	char buf1[MAXDATASIZE];
+	int rv;
 	/* check for command line arguments */
 	if (argc != 3)
 	{
@@ -124,23 +154,74 @@ int main(int argc, char ** argv)
 	}
 
 	printf("%s: ready and listening\n", argv[0]);
-	
-	while (1)
-	{
-		/* accept incoming connections */
-		connection = (connection_t *)malloc(sizeof(connection_t));
-		connection->sock = accept(sock, &connection->address, &connection->addr_len);
-		if (connection->sock <= 0)
-		{
-			free(connection);
-		}
-		else
-		{
-			/* start a new thread but do not wait for it */
-			pthread_create(&thread, 0, worker, (void *)connection);
-			pthread_detach(thread);
+
+	/* Set the socket to non-blocking. */
+	if (setnonblock(sock) < 0)
+		err(1, "failed to set server socket to non-blocking");
+
+
+
+
+	ufds[0].fd = sock;
+	ufds[0].events = POLLIN; // check for normal or out-of-band
+	while(1){
+	 	rv = poll(ufds, 1, -1);
+		if (rv == -1) {
+		    perror("poll"); // error occurred in poll()
+		} 
+		else if (rv == 0) {
+		    printf("Timeout occurred!  No data.\n");
+		} else {
+		    // check for events on sock:
+		    if (ufds[0].revents & POLLIN) {
+		    	
+		    	addr_size = sizeof their_addr;
+		    	new_sock = accept(sock,(struct sockaddr *)&their_addr, &addr_size);
+		        recv(new_sock, buf1, sizeof buf1, 0); // receive normal data
+		        buf1[strlen(buf1)] = '\0';
+		        printf( "%s\n", buf1);
+		        
+		        connection = (connection_t *)malloc(sizeof(connection_t));
+				connection->sock = new_sock;
+				connection->buffer = buf1;
+				if (connection->sock <= 0)
+				{
+					free(connection);
+				}
+				else
+				{
+					/* start a new thread but do not wait for it */
+					pthread_t thread;
+					void *file_content;
+					pthread_create(&thread, 0, worker, (void *)connection);
+					pthread_join(thread, &file_content);
+					send(new_sock, (char*)file_content, MAXDATASIZE, 0);
+					close(new_sock);
+					//pthread_detach(thread);
+				}
+
+		        
+		    }
+
 		}
 	}
-	
+	printf("%s\n", "done");
+	/*
+	while (1)
+	{
+	connection = (connection_t *)malloc(sizeof(connection_t));
+	connection->sock = accept(sock, &connection->address, &connection->addr_len);
+	if (connection->sock <= 0)
+	{
+		free(connection);
+	}
+	else
+	{
+		/ start a new thread but do not wait for it /
+		pthread_create(&thread, 0, worker, (void *)connection);
+		pthread_detach(thread);
+	}
+	}
+	*/
 	return 0;
 }
