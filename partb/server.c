@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/fcntl.h>
 #include <sys/poll.h>
+#include <errno.h>
 
 #define MAXDATASIZE 100000
 
@@ -30,7 +31,7 @@ void * worker(void * ptr)
 	connection_t * conn;
 	long addr = 0;
 	//sleep 5 seconds for testing
-	sleep(5);
+	//sleep(5);
 
 	if (!ptr) pthread_exit(0); 
 	conn = (connection_t *)ptr;
@@ -90,17 +91,19 @@ int setnonblock(int fd)
 
 int main(int argc, char ** argv)
 {
-	int sock = -1;
-	int new_sock;
+	int listen_sock = -1, new_sock = -1;
 	struct sockaddr_in address;
 	struct sockaddr_storage their_addr;
 	socklen_t addr_size;
 	int port;
 	char host_address[80];
 	connection_t * connection;
-	struct pollfd ufds[1];
+	struct pollfd ufds[200];
 	char buf1[MAXDATASIZE];
 	int rv;
+  	int nfds = 1, current_size = 0, len = 1, i, j;
+  	int close_conn;
+  	int end_server = 0, compress_array = 0;
 	/* check for command line arguments */
 	if (argc != 3)
 	{
@@ -122,8 +125,8 @@ int main(int argc, char ** argv)
 	}
 
 	/* create socket */
-	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (sock <= 0)
+	listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (listen_sock <= 0)
 	{
 		fprintf(stderr, "%s: error: cannot create socket\n", argv[0]);
 		return -3;
@@ -134,14 +137,14 @@ int main(int argc, char ** argv)
 	//address.sin_addr.s_addr = INADDR_ANY;
 	inet_pton(AF_INET, host_address, &address.sin_addr);
 	address.sin_port = htons(port);
-	if (bind(sock, (struct sockaddr *)&address, sizeof(struct sockaddr_in)) < 0)
+	if (bind(listen_sock, (struct sockaddr *)&address, sizeof(struct sockaddr_in)) < 0)
 	{
 		fprintf(stderr, "%s: error: cannot bind socket to port %d\n", argv[0], port);
 		return -4;
 	}
 
 	/* listen on port */
-	if (listen(sock, 5) < 0)
+	if (listen(listen_sock, 5) < 0)
 	{
 		fprintf(stderr, "%s: error: cannot listen on port\n", argv[0]);
 		return -5;
@@ -150,27 +153,130 @@ int main(int argc, char ** argv)
 	printf("%s: ready and listening\n", argv[0]);
 
 	/* Set the socket to non-blocking. */
-	if (setnonblock(sock) < 0)
+	if (setnonblock(listen_sock) < 0)
 		err(1, "failed to set server socket to non-blocking");
 
 
 
 
-	ufds[0].fd = sock;
-	ufds[0].events = POLLIN; // check for normal or out-of-band
+	ufds[0].fd = listen_sock;
+	ufds[0].events = POLLIN;
+
 	while(1){
-	 	rv = poll(ufds, 1, -1);
+	 	rv = poll(ufds, nfds, -1);
 		if (rv == -1) {
 		    perror("poll"); // error occurred in poll()
+		    break;
 		} 
-		else if (rv == 0) {
+		if (rv == 0) {
 		    printf("Timeout occurred!  No data.\n");
-		} else {
+		    break;
+		}
+		current_size = nfds;
+	    for (i = 0; i < current_size; i++){		
+      		if(ufds[i].revents == 0){
+        		continue;      			
+      		}
+		    if(ufds[i].revents != POLLIN){
+		        printf("  Error! revents = %d\n", ufds[i].revents);
+		        end_server = 1;
+		        break;
+
+		    }
+      		if (ufds[i].fd == listen_sock){
+		        printf("  Listening socket is readable\n");
+		        do{
+		          	new_sock = accept(listen_sock, NULL, NULL);
+		          	if (new_sock < 0){
+		            	if (errno != EWOULDBLOCK){
+		              		perror("  accept() failed");
+		              		end_server = 1;
+		            	}
+		            break;
+		          	}
+
+			        printf("  New incoming connection - %d\n", new_sock);
+			        ufds[nfds].fd = new_sock;
+			        ufds[nfds].events = POLLIN;
+			        nfds++;
+		        } while (new_sock != -1);
+      		}else{
+		        printf("  Descriptor %d is readable\n", ufds[i].fd);
+		        close_conn = 0;
+		        do{
+		          	rv = recv(ufds[i].fd, buf1, sizeof(buf1), 0);
+		          	if (rv < 0){
+		            	if (errno != EWOULDBLOCK){
+			              	perror(" recv() failed");
+			              	close_conn = 1;
+		            	}
+		            	break;
+		          	}
+		          	if (rv == 0){
+			            printf("  Connection closed\n");
+			            close_conn = 1;
+			            break;
+		          	}
+
+		          	len = rv;
+		          	printf("  %d bytes received\n", len);
+
+			        buf1[len-1] = '\0';
+			        printf( "%s\n", buf1);
+			        
+			        connection = (connection_t *)malloc(sizeof(connection_t));
+					connection->sock = new_sock;
+					connection->buffer = buf1;
+					if (connection->sock <= 0)
+					{
+						free(connection);
+					}
+					else
+					{
+						pthread_t thread;
+						void *file_content;
+						char *file_content_str;
+						pthread_create(&thread, 0, worker, (void *)connection);
+						pthread_join(thread, &file_content);
+						if(file_content){
+							file_content_str = (char*)file_content;
+							rv = send(new_sock, file_content_str, MAXDATASIZE, MSG_NOSIGNAL);
+							if (rv < 0){
+					            perror("  send() failed");
+					            close_conn = 1;
+					            break;
+					        }
+						}
+						//close(new_sock);
+						close_conn = 1;
+					}
+
+		        } while(1);
+		        if (close_conn){
+		            close(ufds[i].fd);
+		            ufds[i].fd = -1;
+		            compress_array = 1;
+        		}
+		    }
+		}
+
+		if (compress_array){
+      		compress_array = 0;
+      		for (i = 0; i < nfds; i++){
+        		if (ufds[i].fd == -1){
+          			for(j = i; j < nfds; j++){
+            			ufds[j].fd = ufds[j+1].fd;
+          			}
+          			nfds--;
+        		}
+      		}
+    	}
+		    /*      		
 		    // check for events on sock:
 		    if (ufds[0].revents & POLLIN) {
 		    	
 		    	addr_size = sizeof their_addr;
-		    	new_sock = accept(sock,(struct sockaddr *)&their_addr, &addr_size);
+		    	new_sock = accept(listen_sock,(struct sockaddr *)&their_addr, &addr_size);
 		        recv(new_sock, buf1, sizeof buf1, 0); // receive normal data
 		        buf1[strlen(buf1)-1] = '\0';
 		        printf( "%s\n", buf1);
@@ -198,8 +304,9 @@ int main(int argc, char ** argv)
 
 		        
 		    }
+		    */
 
-		}
+		
 	}
 	printf("%s\n", "end somehow");
 
