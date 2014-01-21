@@ -1,3 +1,14 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <linux/in.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/fcntl.h>
+#include <sys/poll.h>
+#include <errno.h>
+#define MAXDATASIZE 100000
 typedef struct
 {
     int sock;
