@@ -33,10 +33,10 @@ void * worker(void * ptr)
 	//sleep 5 seconds for testing
 	sleep(5);
 
-	if (!ptr) pthread_exit(0); 
+	if (!ptr) pthread_exit(0);
 	conn = (connection_t *)ptr;
 
-	
+
 	FILE *fp;
 	fp=fopen(conn->buffer, "r");
 	if(fp){
@@ -92,9 +92,9 @@ int main(int argc, char ** argv)
 	struct pollfd ufds[200];
 	char buf1[MAXDATASIZE];
 	int rv;
-  	int nfds = 1, current_size = 0, len = 1, i, j;
-  	int close_conn;
-  	int end_server = 0, compress_array = 0;
+	int nfds = 1, current_size = 0, len = 1, i, j;
+	int close_conn;
+	int end_server = 0, compress_array = 0;
 	/* check for command line arguments */
 	if (argc != 3)
 	{
@@ -157,65 +157,64 @@ int main(int argc, char ** argv)
 		printf("current size%d\n", current_size);
 	 	rv = poll(ufds, nfds, -1);
 		if (rv == -1) {
-		    perror("poll"); // error occurred in poll()
-		    break;
-		} 
+	    perror("poll"); // error occurred in poll()
+	    break;
+		}
 		if (rv == 0) {
-		    printf("Timeout occurred!  No data.\n");
-		    break;
+	    printf("Timeout occurred!  No data.\n");
+	    break;
 		}
 		current_size = nfds;
-	    for (i = 0; i < current_size; i++){		
-      		if(ufds[i].revents == 0){
-        		continue;      			
-      		}
-		    if(ufds[i].revents != POLLIN){
-		        printf("  Error! revents = %d\n", ufds[i].revents);
-		        end_server = 1;
-		        break;
+    for (i = 0; i < current_size; i++){
+  		if(ufds[i].revents == 0){
+    		continue;
+  		}
+	    if(ufds[i].revents != POLLIN){
+	        printf("  Error! revents = %d\n", ufds[i].revents);
+	        end_server = 1;
+	        break;
+	    }
+  		if (ufds[i].fd == listen_sock){
+        printf("  Listening socket is readable\n");
+        do{
+          	new_sock = accept(listen_sock, NULL, NULL);
+          	if (new_sock < 0){
+            	if (errno != EWOULDBLOCK){
+              		perror("  accept() failed");
+              		end_server = 1;
+            	}
+            break;
+          	}
 
-		    }
-      		if (ufds[i].fd == listen_sock){
-		        printf("  Listening socket is readable\n");
-		        do{
-		          	new_sock = accept(listen_sock, NULL, NULL);
-		          	if (new_sock < 0){
-		            	if (errno != EWOULDBLOCK){
-		              		perror("  accept() failed");
-		              		end_server = 1;
-		            	}
-		            break;
-		          	}
+	        printf("  New incoming connection - %d\n", new_sock);
+	        ufds[nfds].fd = new_sock;
+	        ufds[nfds].events = POLLIN;
+	        nfds++;
+        } while (new_sock != -1);
+  		}else{
+        printf("  Descriptor %d is readable\n", ufds[i].fd);
+        close_conn = 0;
+        do{
+        	rv = recv(ufds[i].fd, buf1, sizeof(buf1), 0);
+        	if (rv < 0){
+          	if (errno != EWOULDBLOCK){
+              	perror(" recv() failed");
+              	close_conn = 1;
+          	}
+          	break;
+        	}
+        	if (rv == 0){
+            printf("  Connection closed\n");
+            close_conn = 1;
+            break;
+        	}
 
-			        printf("  New incoming connection - %d\n", new_sock);
-			        ufds[nfds].fd = new_sock;
-			        ufds[nfds].events = POLLIN;
-			        nfds++;
-		        } while (new_sock != -1);
-      		}else{
-		        printf("  Descriptor %d is readable\n", ufds[i].fd);
-		        close_conn = 0;
-		        do{
-		          	rv = recv(ufds[i].fd, buf1, sizeof(buf1), 0);
-		          	if (rv < 0){
-		            	if (errno != EWOULDBLOCK){
-			              	perror(" recv() failed");
-			              	close_conn = 1;
-		            	}
-		            	break;
-		          	}
-		          	if (rv == 0){
-			            printf("  Connection closed\n");
-			            close_conn = 1;
-			            break;
-		          	}
+        	len = rv;
+        	printf("  %d bytes received\n", len);
 
-		          	len = rv;
-		          	printf("  %d bytes received\n", len);
-
-			        buf1[len-1] = '\0';
-			        printf( "%s\n", buf1);
-			        connection = (connection_t *)malloc(sizeof(connection_t));
+	        buf1[len-1] = '\0';
+	        printf( "%s\n", buf1);
+	        connection = (connection_t *)malloc(sizeof(connection_t));
 					connection->sock = ufds[i].fd;
 					connection->buffer = buf1;
 					if (connection->sock <= 0)
@@ -233,73 +232,69 @@ int main(int argc, char ** argv)
 							file_content_str = (char*)file_content;
 							rv = send(ufds[i].fd, file_content_str, MAXDATASIZE, MSG_NOSIGNAL);
 							if (rv < 0){
-					            perror("  send() failed");
-					            close_conn = 1;
-					            break;
-					        }
+		            perror("  send() failed");
+		            close_conn = 1;
+		            break;
+			        }
 						}
 						close_conn = 1;
 						break;
 					}
-
-		        } while(1);
-		        if (close_conn){
-		            close(ufds[i].fd);
-		            ufds[i].fd = -1;
-		            compress_array = 1;
-        		}
-		    }
+        } while(1);
+        if (close_conn){
+          close(ufds[i].fd);
+          ufds[i].fd = -1;
+          compress_array = 1;
+    		}
+	    }
 		}
 
 		if (compress_array){
-      		compress_array = 0;
-      		for (i = 0; i < nfds; i++){
-        		if (ufds[i].fd == -1){
-          			for(j = i; j < nfds; j++){
-            			ufds[j].fd = ufds[j+1].fd;
-          			}
-          			nfds--;
-        		}
-      		}
-    	}
-		    /*      		
-		    // check for events on sock:
-		    if (ufds[0].revents & POLLIN) {
-		    	
-		    	addr_size = sizeof their_addr;
-		    	new_sock = accept(listen_sock,(struct sockaddr *)&their_addr, &addr_size);
-		        recv(new_sock, buf1, sizeof buf1, 0); // receive normal data
-		        buf1[strlen(buf1)-1] = '\0';
-		        printf( "%s\n", buf1);
-		        
-		        connection = (connection_t *)malloc(sizeof(connection_t));
-				connection->sock = new_sock;
-				connection->buffer = buf1;
-				if (connection->sock <= 0)
-				{
-					free(connection);
-				}
-				else
-				{
-					pthread_t thread;
-					void *file_content;
-					char *file_content_str;
-					pthread_create(&thread, 0, worker, (void *)connection);
-					pthread_join(thread, &file_content);
-					if(file_content){
-						file_content_str = (char*)file_content;
-						send(new_sock, file_content_str, MAXDATASIZE, MSG_NOSIGNAL);
-					}
-					close(new_sock);
-				}
+  		compress_array = 0;
+  		for (i = 0; i < nfds; i++){
+    		if (ufds[i].fd == -1){
+    			for(j = i; j < nfds; j++){
+      			ufds[j].fd = ufds[j+1].fd;
+    			}
+    			nfds--;
+    		}
+  		}
+  	}
+    /*
+    // check for events on sock:
+    if (ufds[0].revents & POLLIN) {
 
-		        
-		    }
-		    */
+    	addr_size = sizeof their_addr;
+    	new_sock = accept(listen_sock,(struct sockaddr *)&their_addr, &addr_size);
+        recv(new_sock, buf1, sizeof buf1, 0); // receive normal data
+        buf1[strlen(buf1)-1] = '\0';
+        printf( "%s\n", buf1);
 
-		
+        connection = (connection_t *)malloc(sizeof(connection_t));
+		connection->sock = new_sock;
+		connection->buffer = buf1;
+		if (connection->sock <= 0)
+		{
+			free(connection);
+		}
+		else
+		{
+			pthread_t thread;
+			void *file_content;
+			char *file_content_str;
+			pthread_create(&thread, 0, worker, (void *)connection);
+			pthread_join(thread, &file_content);
+			if(file_content){
+				file_content_str = (char*)file_content;
+				send(new_sock, file_content_str, MAXDATASIZE, MSG_NOSIGNAL);
+			}
+			close(new_sock);
+		}
+
+
+    }
+    */
 	}
 	printf("%s\n", "end somehow");
-
 	return 0;
 }
