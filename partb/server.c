@@ -31,20 +31,11 @@ void * worker(void * ptr)
 	connection_t * conn;
 	long addr = 0;
 	//sleep 5 seconds for testing
-	//sleep(5);
+	sleep(5);
 
 	if (!ptr) pthread_exit(0); 
 	conn = (connection_t *)ptr;
 
-	/* read length of message */
-	//read(conn->sock, &len, sizeof(int));
-
-	//buffer[len] = 0;
-
-	/* waiting for the network input */
-	//recv(conn->sock, buffer, MAXDATASIZE,0);
-	//conn->buffer[strlen(conn->buffer)-1] = '\0';
-	//printf("%d\n",strlen(conn->buffer));
 	
 	FILE *fp;
 	fp=fopen(conn->buffer, "r");
@@ -162,7 +153,8 @@ int main(int argc, char ** argv)
 	ufds[0].fd = listen_sock;
 	ufds[0].events = POLLIN;
 
-	while(1){
+	while(end_server == 0){
+		printf("current size%d\n", current_size);
 	 	rv = poll(ufds, nfds, -1);
 		if (rv == -1) {
 		    perror("poll"); // error occurred in poll()
@@ -223,9 +215,8 @@ int main(int argc, char ** argv)
 
 			        buf1[len-1] = '\0';
 			        printf( "%s\n", buf1);
-			        
 			        connection = (connection_t *)malloc(sizeof(connection_t));
-					connection->sock = new_sock;
+					connection->sock = ufds[i].fd;
 					connection->buffer = buf1;
 					if (connection->sock <= 0)
 					{
@@ -240,15 +231,15 @@ int main(int argc, char ** argv)
 						pthread_join(thread, &file_content);
 						if(file_content){
 							file_content_str = (char*)file_content;
-							rv = send(new_sock, file_content_str, MAXDATASIZE, MSG_NOSIGNAL);
+							rv = send(ufds[i].fd, file_content_str, MAXDATASIZE, MSG_NOSIGNAL);
 							if (rv < 0){
 					            perror("  send() failed");
 					            close_conn = 1;
 					            break;
 					        }
 						}
-						//close(new_sock);
 						close_conn = 1;
+						break;
 					}
 
 		        } while(1);
