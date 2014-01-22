@@ -8,18 +8,31 @@
 #include <sys/fcntl.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <errno.h>
+#include <time.h>
 
-#define MAXDATASIZE 1024
+#define MAXDATASIZE 3096
 #define NUMTHREADS 4
 #define NUMFD 200
 
-//need a lock
 int fd[2];
 int out_sock;
+char *output;
 pthread_mutex_t mutex_pipe; //lock to write thing to pipe
 pthread_mutex_t mutex_task; //lock to access task list to get task
 pthread_cond_t cv_task; //condition variable to show the task list can be accessed now
+
+
+/* this is used for a short time out (0.01 sec) in the code */
+int self_sleep(){
+	struct timespec tim;
+	tim.tv_sec = 0;
+	tim.tv_nsec = 10000000L;
+	nanosleep(&tim , NULL);
+	return 1;
+}
+
 
 
 /* get file size */
@@ -106,8 +119,9 @@ void* worker(void * ptr)
 			continue;
 		}
 
-		//sleep 5 seconds for testing
 		printf("starting thread for %d\n", current_task->sock);
+		
+		//sleep 5 seconds for concurrency testing
 		//sleep(5);
 
 
@@ -115,28 +129,27 @@ void* worker(void * ptr)
 		fp=fopen(current_task->fName, "r");
 		if(fp){
 			file_size = fsize(current_task->fName);
-			char* message;
-			message = (char *)malloc((file_size+1)*sizeof(char));
+			char* thread_output;
+			thread_output = (char *)malloc((file_size+1)*sizeof(char));
 			
 			while( ( ch = fgetc(fp) ) != EOF ){
-				//note:error might occur when reallocate
-				message[current_len] = ch;
+				thread_output[current_len] = ch;
 				current_len++;
 			}
-			message[current_len] = '\0';
+			thread_output[current_len] = '\0';
 			//printf("current_len strlen %d %d\n", current_len, strlen(message));
-
+			printf("file size: %d\n", file_size);
 
 			fclose(fp);
 			pthread_mutex_lock (&mutex_pipe);
-			printf("thread writing to the pipe now\n");
+			printf("thread writing to the output now\n");
 
 			out_sock = current_task->sock;
-
-			printf("message to write to pipe: %s\n", message);
-			printf("out_sock %d\n", out_sock);
-
-			write(fd[1], message, sizeof(message));
+			output = thread_output;
+			char* message;
+			message = (char *)malloc(6*sizeof(char));
+			strcpy(message, "exist\0");
+			write(fd[1], message, 6);
 			free(message);
 		}else{
 			printf("tp no file\n");
@@ -145,10 +158,11 @@ void* worker(void * ptr)
 			char* message;
 			message = (char *)malloc(3*sizeof(char));
 			strcpy(message, "no\0");
-			write(fd[1],message, sizeof(message));
+			write(fd[1], message, 3);
 			free(message);
 		}
-		sleep(1);
+		self_sleep();// sleep 0.01 second before release the lock
+		//sleep(1);
 		pthread_mutex_unlock (&mutex_pipe);
 
 		free(current_task);
@@ -182,6 +196,7 @@ int main(int argc, char ** argv)
 	int port;
 	char host_address[80];
 	struct pollfd ufds[NUMFD];
+	char *bufPipe;
 	char buf1[MAXDATASIZE];
 	char buf2[MAXDATASIZE];
 	int rv;
@@ -327,12 +342,17 @@ int main(int argc, char ** argv)
 
 		  		}else if (ufds[i].fd == fd[0]){
 			        printf("  File io %d is readable\n", ufds[i].fd);
-			    	//it's a file io event
-			    	if ((n = read(ufds[i].fd, buf1, MAXDATASIZE)) >= 0) {
-			    		buf1[n] = 0;	// terminate the string
-			    		printf("read %d bytes from the pipe: \"%s\"\n", n, buf1);
+
+			    	if ((n = read(ufds[i].fd, buf1, 8) >= 0)) {
 			    		if(strcmp(buf1,"no")!=0){
-							rv = send(out_sock, buf1, n+1, MSG_NOSIGNAL);			    			
+			    			printf("output length %d\n", strlen(output));
+			    			for(j=0 ; j*MAXDATASIZE < strlen(output); j++ ){
+			    				strncpy(buf2, output+(j*MAXDATASIZE),MAXDATASIZE);
+			    				//use MSG_NOSIGNAL to prevent SIGPIPE
+								rv = send(out_sock, buf2, MAXDATASIZE, MSG_NOSIGNAL);
+			    			}
+			    			free(output);
+			    			
 			    		}else{
 			    			printf("file not exist\n");
 			    		}
@@ -340,13 +360,13 @@ int main(int argc, char ** argv)
 			    	}
 			    	printf("outgoing socket: %d\n", out_sock);
 			        close(out_sock);
+			        printf("close sock %d\n", out_sock);
 			        for (j = 0; j < nfds; j++){
 			        	if (ufds[j].fd == out_sock){
 			        		ufds[j].fd = -1;
 			        		out_sock = -1;				        		
 			        	} 				        	
 			        }
-			        //someone_writing = 0;
   			    	compress_array = 1;
   			    	break;
 
@@ -387,7 +407,10 @@ int main(int argc, char ** argv)
 			}
 		}
 
+
+		/* at least one of the socket is closed, compress the ufds array here */
 		if (compress_array){
+			printf("remove element from ufds array\n");
 	  		compress_array = 0;
 	  		for (i = 0; i < nfds; i++){
 	    		if (ufds[i].fd == -1){
@@ -397,6 +420,7 @@ int main(int argc, char ** argv)
 	    			nfds--;
 	    		}
 	  		}
+			//break;
 		}
 
 
