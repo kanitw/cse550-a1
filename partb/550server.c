@@ -12,19 +12,26 @@
 #include <errno.h>
 #include <time.h>
 
-#define MAXDATASIZE 3096
-#define NUMTHREADS 4
-#define NUMFD 200
+#define MAXDATASIZE 3096  //max buffer size
+#define NUMTHREADS 4	  //number of threads in the thread pool
+#define NUMFD 256	//number of maximum file descriptors use for poll()
 
-int fd[2];
-int out_sock;
-char *output;
+
+
 pthread_mutex_t mutex_pipe; //lock to write thing to pipe
 pthread_mutex_t mutex_task; //lock to access task list to get task
 pthread_cond_t cv_task; //condition variable to show the task list can be accessed now
 
+/* 	The below three variables are used to get content from a worker thread. 
+	Then the main thread can send the content through the target socket. 
+	They are protected by the lock (mutex pipe)
+ */
 
-/* this is used for a short time out (0.01 sec) in the code */
+int fd[2]; //file descriptors for the pipe used for all the threads
+int out_sock; //indicator to the socket that the main thread should write to
+char *output; //the pointer to the file content that should write to the target socket
+
+/* this function is used for a short time out (0.01 sec) in the code */
 int self_sleep(){
 	struct timespec tim;
 	tim.tv_sec = 0;
@@ -47,16 +54,19 @@ off_t fsize(const char *filename) {
     return -1;
 }
 
-struct task
-{
+/* a structure that stores the task that dispatch to the thread */
+
+struct task{
 	int sock;
 	char fName[256];
 	struct task *next;
 };
 
-struct task *taskList = NULL; //a queue that stores the info of remaining tasks accessable by all the threads, protected by lock
+/* a queue that stores the info of remaining tasks accessable by all the threads, protected by lock (mutex_task) */
 
-/* function that return a task from taskList, protected by lock */
+struct task *taskList = NULL; 
+
+/* function that return a task from taskList, protected by lock (mutex_task)*/
 
 struct task * getTask(){  
 	struct task *currPtr = taskList;
@@ -93,21 +103,28 @@ void printTasks(){
 	}
 } 
 
-void* worker(void * ptr)
-{
+/*  The worker thread wait for a signal and wake up to get a task from the taskList.
+	After the worker get the task, it reads the file content and wait again for the
+	lock of the pipe. When it unlocks, the thread copy the pointer to output, set
+	the corresponding output socket, and send a signal through the pipe to wake up
+	the main thread in poll(). After finish the task, the worker thread go back to 
+	wait for another signal.
+
+*/
+
+void* worker(void * ptr){
 
 	while(1){
 		printf("tp: initialize thread\n");
 		char ch;
-		char *message;
 		int current_len = 0, file_size = 0;
 		struct task * current_task;
+		/* conditional wait for a signal to do work */
 		pthread_mutex_lock (&mutex_task);
 		pthread_cond_wait(&cv_task, &mutex_task);
-		//check if there is something to do
-		printf("tp: waking up!!!\n");
-		printTasks(); 
-		if(taskList){ //yes, get the task
+		/* waken up by a signal. check if there is something to do */
+		printf("waking up!!!\n");
+		if(taskList){ //yes, get the task from the taskList
 			current_task = getTask();
 			if(!current_task){
 				continue;
@@ -124,9 +141,10 @@ void* worker(void * ptr)
 		//sleep 5 seconds for concurrency testing
 		//sleep(5);
 
-
 		FILE *fp;
 		fp=fopen(current_task->fName, "r");
+
+		/* If the file exists, open the file and read the content into memory */
 		if(fp){
 			file_size = fsize(current_task->fName);
 			char* thread_output;
@@ -137,10 +155,10 @@ void* worker(void * ptr)
 				current_len++;
 			}
 			thread_output[current_len] = '\0';
-			//printf("current_len strlen %d %d\n", current_len, strlen(message));
 			printf("file size: %d\n", file_size);
-
 			fclose(fp);
+
+			/* Finish reading. Try to write to the pipe and shared memory*/ 
 			pthread_mutex_lock (&mutex_pipe);
 			printf("thread writing to the output now\n");
 
@@ -149,20 +167,24 @@ void* worker(void * ptr)
 			char* message;
 			message = (char *)malloc(6*sizeof(char));
 			strcpy(message, "exist\0");
-			write(fd[1], message, 6);
+			write(fd[1], message, 6); //write the file exists message to the pipe to notify the main thread
 			free(message);
+
+		/* File not exist. Write the pipe to notify the main thread to close connection */
+
 		}else{
-			printf("tp no file\n");
+			printf("tp: no file\n");
 			pthread_mutex_lock (&mutex_pipe);
 			out_sock = current_task->sock;
 			char* message;
 			message = (char *)malloc(3*sizeof(char));
-			strcpy(message, "no\0");
+			strcpy(message, "no\0"); //write the file doesn't exist message to the pipe to nofify the main thread
 			write(fd[1], message, 3);
 			free(message);
 		}
 		self_sleep();// sleep 0.01 second before release the lock
-		//sleep(1);
+
+		/* Finish accessing the shared memory and pipe. release the lock. */
 		pthread_mutex_unlock (&mutex_pipe);
 
 		free(current_task);
@@ -173,8 +195,7 @@ void* worker(void * ptr)
 }
 
 /* Set a file descriptor to non-blocking mode. */
-int setnonblock(int fd)
-{
+int setnonblock(int fd){
 	int flags;
 
 	flags = fcntl(fd, F_GETFL);
@@ -187,23 +208,25 @@ int setnonblock(int fd)
 	return 0;
 }
 
-int main(int argc, char ** argv)
-{
+/* 	The main thread cope with all the network IO. There is also pipe for the main 
+	thread to know there is one worker thread is finish its job. The main thread 
+	uses poll() to determine which file descriptor (network IO or pipe) 
+
+*/
+
+int main(int argc, char ** argv){
+
 	int listen_sock = -1, new_sock = -1;
 	struct sockaddr_in address;
 	struct sockaddr_storage their_addr;
 	socklen_t addr_size;
 	int port;
 	char host_address[80];
-	struct pollfd ufds[NUMFD];
-	char *bufPipe;
+	struct pollfd ufds[NUMFD]; //a file descriptor array used for poll(); 
 	char buf1[MAXDATASIZE];
 	char buf2[MAXDATASIZE];
-	int rv;
-	int nfds = 2, current_size = 0, len = 1, i = 0, j = 0, n = 0;
+	int rv, nfds = 2, current_size = 0, len = 1, i = 0, j = 0, n = 0;
 	int close_conn = 0, end_server = 0, compress_array = 0;
-	pthread_t threadPool[NUMTHREADS];
-	int thread_count = 0;
 
 	/* initialize the locks for the threads*/
 	pthread_mutex_init(&mutex_pipe, NULL);
@@ -211,7 +234,7 @@ int main(int argc, char ** argv)
 	pthread_cond_init (&cv_task, NULL);
 
 	/* initialize the threads in the threadPool */
-
+	pthread_t threadPool[NUMTHREADS];
 	for(i = 0; i < NUMTHREADS; i++) {
 	    pthread_create(&threadPool[i], NULL, worker, NULL);
 	}	
@@ -253,6 +276,7 @@ int main(int argc, char ** argv)
 	}
 
 	/* bind socket to port */
+
 	address.sin_family = AF_INET;
 	inet_pton(AF_INET, host_address, &address.sin_addr);
 	address.sin_port = htons(port);
@@ -269,6 +293,7 @@ int main(int argc, char ** argv)
 		return -5;
 	}
 
+	/* Finish creating the socket */ 
 	printf("%s: ready and listening\n", argv[0]);
 
 	/* Set the socket to non-blocking. */
@@ -277,23 +302,19 @@ int main(int argc, char ** argv)
 
 
 
-	//add listening socket for polling
+	//add listening socket for poll()
 	ufds[0].fd = listen_sock;
 	ufds[0].events = POLLIN;
 
-	//add pipe read end for polling
+	//add the shared pipe read end for poll()
 	ufds[1].fd = fd[0];
 	ufds[1].events = POLLIN;
 
 	while(end_server == 0){
-
-		//show all current file descriptor(test)
-		printf("current file descriptors count %d\n", nfds);
-		for (i = 0; i < nfds ; i++){
-			printf("fd %d\n", ufds[i].fd);
-		}
-		printf("%s\n", "--------");
-
+		printf("current number of file descriptors %d\n", nfds);
+		/* 	Check if there are tasks in the taskList.
+			If yes, send a signal to a waiting thread
+		*/
 		if(taskList){
 			printf("send signal to wake up thread\n");
 			pthread_cond_signal(&cv_task);
@@ -307,6 +328,8 @@ int main(int argc, char ** argv)
 		}
 		current_size = nfds;
 
+		/* this loop checks which file descriptor has thing to read */
+
 	    for (i = 0; i < current_size; i++){
 	  		if(ufds[i].revents == 0){
 	    		continue;
@@ -317,9 +340,12 @@ int main(int argc, char ** argv)
 		        end_server = 1;
 		        break;
 		    }
-		    //some events happen		    
+		    /* Some events happen */		    
 		    if(ufds[i].revents == POLLIN){ 
-		    	//an event occurs at listening socket, accept all new connections
+
+		    	/*	An event occurs at listening socket. Accept all new connections 
+					and add them to the file descriptors for poll()
+		    	*/
 		  		if (ufds[i].fd == listen_sock){ 
 			        printf("  Listening socket is readable\n");
 			        do{
@@ -338,29 +364,40 @@ int main(int argc, char ** argv)
 				        nfds++;
 			        } while (new_sock != -1);
 
-			    /*event occurs at the pipe read end, read the data and send back to the client*/
-
+			    /*	An event occurs at the pipe read end. Read the data and send
+			     	back to the client through socket.
+			    */
 		  		}else if (ufds[i].fd == fd[0]){
 			        printf("  File io %d is readable\n", ufds[i].fd);
 
+			        /* Read the pipe to check if the file exists or not */
 			    	if ((n = read(ufds[i].fd, buf1, 8) >= 0)) {
+			    		/* File exists. Read the data from shared memory and send it through socket */
 			    		if(strcmp(buf1,"no")!=0){
 			    			printf("output length %d\n", strlen(output));
+
+			    			/* 	Separate the data to pieces by MAXDATASIZE.
+								Send them piece by piece through socket.
+			    			*/ 
 			    			for(j=0 ; j*MAXDATASIZE < strlen(output); j++ ){
 			    				strncpy(buf2, output+(j*MAXDATASIZE),MAXDATASIZE);
-			    				//use MSG_NOSIGNAL to prevent SIGPIPE
+			    				/* Send the data through socket. Use MSG_NOSIGNAL to prevent SIGPIPE from socket */
 								rv = send(out_sock, buf2, MAXDATASIZE, MSG_NOSIGNAL);
 			    			}
 			    			free(output);
-			    			
+						/* File does not exist. Close the connection directly */			    			
 			    		}else{
 			    			printf("file not exist\n");
 			    		}
 
 			    	}
-			    	printf("outgoing socket: %d\n", out_sock);
-			        close(out_sock);
-			        printf("close sock %d\n", out_sock);
+
+			    	printf("file write to socket: %d\n", out_sock);
+
+			    	/* 	Finish writing file to the socket. 
+			    		Close the socket and mark the file descriptor in the array to remove it.
+			    	*/
+			        close(out_sock); 
 			        for (j = 0; j < nfds; j++){
 			        	if (ufds[j].fd == out_sock){
 			        		ufds[j].fd = -1;
@@ -370,45 +407,51 @@ int main(int argc, char ** argv)
   			    	compress_array = 1;
   			    	break;
 
-  			    //events occur at network IO, read the fileName and dispatch the work
+  			    /* 	Events occur at network IO. Read the fileName and dispatch the work to the thread
+  			    */
 		  		}else{
 			        printf("  Network io %d is readable\n", ufds[i].fd);
 			        close_conn = 0;
 		        	rv = recv(ufds[i].fd, buf2, sizeof(buf2), 0);
+		        	/* 	Check if there is something wrong in receiving data.
+						If yes, close the connection by setting close_conn = 1
+					*/
 		        	if (rv < 0){
 			          	if (errno != EWOULDBLOCK){
 			              	perror(" recv() failed");
 			              	close_conn = 1;
 			          	}
 			          	break;
-		        	}
-		        	if (rv == 0){
+		        	}else if (rv == 0){
 			            printf("  Connection closed\n");
 			            close_conn = 1;
 		            	break;
+		            /*	Receive data successfully. */ 
+		        	}else{
+			        	len = rv;
+				        buf2[len-1] = '\0'; //this removes the '\n' at the end of the incoming message
+
+			        	printf(" %d bytes received: %s\n", len, buf2);
+
+
+				        /* add a new task to the taskList*/
+				        addTask(ufds[i].fd, buf2);
+
 		        	}
 
-		        	len = rv;
-		        	printf("  %d bytes received\n", len);
-
-			        buf2[len-1] = '\0';
-			        printf( "%s\n", buf2);
-
-			        /* add a new task to the taskList*/
-			        addTask(ufds[i].fd, buf2);
-
+		        	/* Close the connection and mark it in the file descriptor array for poll() */
 			        if (close_conn){
 			          	close(ufds[i].fd);
 			          	ufds[i].fd = -1;
 			          	compress_array = 1;
 			    	}
-			    	break;
+			    	break; //break to send signal to worker thread
 			    }
 			}
 		}
 
 
-		/* at least one of the socket is closed, compress the ufds array here */
+		/* At least one of the socket is closed, compress the ufds array here */
 		if (compress_array){
 			printf("remove element from ufds array\n");
 	  		compress_array = 0;
@@ -420,7 +463,6 @@ int main(int argc, char ** argv)
 	    			nfds--;
 	    		}
 	  		}
-			//break;
 		}
 
 
@@ -431,6 +473,7 @@ int main(int argc, char ** argv)
 	printf("%s\n", "program ends");
 	pthread_mutex_destroy(&mutex_pipe);
 	pthread_mutex_destroy(&mutex_task);
+	pthread_cond_destroy(&cv_task);
 	pthread_exit(NULL);
 	return 0;
 }
