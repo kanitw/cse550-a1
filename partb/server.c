@@ -7,10 +7,11 @@
 #include <string.h>
 #include <sys/fcntl.h>
 #include <sys/poll.h>
+#include <sys/stat.h>
 #include <errno.h>
 
-#define MAXDATASIZE 100000
-#define NUMTHREADS 10
+#define MAXDATASIZE 1024
+#define NUMTHREADS 4
 #define NUMFD 200
 
 //need a lock
@@ -20,13 +21,18 @@ pthread_mutex_t mutex_pipe; //lock to write thing to pipe
 pthread_mutex_t mutex_task; //lock to access task list to get task
 pthread_cond_t cv_task; //condition variable to show the task list can be accessed now
 
-int someone_writing = 0;
 
-typedef struct
-{
-	int sock;
-	char fName[256];
-} task_t;
+/* get file size */
+off_t fsize(const char *filename) {
+    struct stat st;
+
+    if (stat(filename, &st) == 0)
+        return st.st_size;
+
+    fprintf(stderr, "Cannot determine size of %s: %s\n", filename, strerror(errno));
+
+    return -1;
+}
 
 struct task
 {
@@ -45,14 +51,6 @@ struct task * getTask(){
 	if(currPtr){
 		taskList = currPtr->next;
 		return currPtr;
-		/*
-		while(currPtr->next){
-			prevPtr = currPtr;
-			currPtr = currPtr-> next;
-		}
-		prevPtr->next = NULL;
-		return currPtr;
-		*/
 	}else{
 		return NULL;
 	}
@@ -89,9 +87,7 @@ void* worker(void * ptr)
 		printf("tp: initialize thread\n");
 		char ch;
 		char *message;
-		message = (char *)malloc((MAXDATASIZE)*sizeof(char));
-		int current_len = 0;
-		int current_size = MAXDATASIZE;
+		int current_len = 0, file_size = 0;
 		struct task * current_task;
 		pthread_mutex_lock (&mutex_task);
 		pthread_cond_wait(&cv_task, &mutex_task);
@@ -104,64 +100,59 @@ void* worker(void * ptr)
 				continue;
 			}
 			pthread_mutex_unlock (&mutex_task); //finished accessing tasklist, release the lock
-			/*
-			if(taskList){ //check it again to see if there is still something else to do. if yes, send signal to other threads
-				pthread_cond_signal(&cv_task);
-			}
-			*/			
+
 		}else{ // no, keep sleeping
-			printf("sleeping...\n");
+			printf("WARNING: waking a thread and no task remaining\n");
 			continue;
 		}
 
 		//sleep 5 seconds for testing
 		printf("starting thread for %d\n", current_task->sock);
-		sleep(5);
+		//sleep(5);
 
-		printf("tp0\n");
+
 		FILE *fp;
 		fp=fopen(current_task->fName, "r");
 		if(fp){
+			file_size = fsize(current_task->fName);
+			char* message;
+			message = (char *)malloc((file_size+1)*sizeof(char));
 			
 			while( ( ch = fgetc(fp) ) != EOF ){
 				//note:error might occur when reallocate
-
-				if(current_len >= current_size-10){
-					current_size*=2;
-					message = (char*)realloc(message, current_size * sizeof(char));
-				}
 				message[current_len] = ch;
 				current_len++;
 			}
 			message[current_len] = '\0';
-			printf("current_len strlen %d %d\n", current_len, strlen(message));
+			//printf("current_len strlen %d %d\n", current_len, strlen(message));
 
 
 			fclose(fp);
 			pthread_mutex_lock (&mutex_pipe);
-			while(someone_writing){
-				printf("someone writing\n");
-				//busy waiting for a bit;
-			}
-			someone_writing = 1;
+			printf("thread writing to the pipe now\n");
+
 			out_sock = current_task->sock;
 
 			printf("message to write to pipe: %s\n", message);
 			printf("out_sock %d\n", out_sock);
 
-			write(fd[1],message,current_len+1);
-			pthread_mutex_unlock (&mutex_pipe);
+			write(fd[1], message, sizeof(message));
 			free(message);
-			free(current_task);
 		}else{
 			printf("tp no file\n");
 			pthread_mutex_lock (&mutex_pipe);
 			out_sock = current_task->sock;
-			write(fd[1],"no\0",3);
-			pthread_mutex_unlock (&mutex_pipe);
+			char* message;
+			message = (char *)malloc(3*sizeof(char));
+			strcpy(message, "no\0");
+			write(fd[1],message, sizeof(message));
 			free(message);
-			free(current_task);
 		}
+		sleep(1);
+		pthread_mutex_unlock (&mutex_pipe);
+
+		free(current_task);
+
 	}
 
 	pthread_exit(0);
@@ -191,7 +182,8 @@ int main(int argc, char ** argv)
 	int port;
 	char host_address[80];
 	struct pollfd ufds[NUMFD];
-	char buf1[MAXDATASIZE], buf2[MAXDATASIZE];
+	char buf1[MAXDATASIZE];
+	char buf2[MAXDATASIZE];
 	int rv;
 	int nfds = 2, current_size = 0, len = 1, i = 0, j = 0, n = 0;
 	int close_conn = 0, end_server = 0, compress_array = 0;
@@ -289,7 +281,6 @@ int main(int argc, char ** argv)
 
 		if(taskList){
 			printf("send signal to wake up thread\n");
-			//sleep(1);
 			pthread_cond_signal(&cv_task);
 		}
 
@@ -340,7 +331,7 @@ int main(int argc, char ** argv)
 			    	if ((n = read(ufds[i].fd, buf1, MAXDATASIZE)) >= 0) {
 			    		buf1[n] = 0;	// terminate the string
 			    		printf("read %d bytes from the pipe: \"%s\"\n", n, buf1);
-			    		if(n>3){
+			    		if(strcmp(buf1,"no")!=0){
 							rv = send(out_sock, buf1, n+1, MSG_NOSIGNAL);			    			
 			    		}else{
 			    			printf("file not exist\n");
@@ -355,7 +346,7 @@ int main(int argc, char ** argv)
 			        		out_sock = -1;				        		
 			        	} 				        	
 			        }
-			        someone_writing = 0;
+			        //someone_writing = 0;
   			    	compress_array = 1;
   			    	break;
 
@@ -383,7 +374,7 @@ int main(int argc, char ** argv)
 			        buf2[len-1] = '\0';
 			        printf( "%s\n", buf2);
 
-			        /* add a new task to the taskList, and send the signal to the threads for them to work */
+			        /* add a new task to the taskList*/
 			        addTask(ufds[i].fd, buf2);
 
 			        if (close_conn){
@@ -413,7 +404,7 @@ int main(int argc, char ** argv)
 	}
 
 	/* closing the program */
-	printf("%s\n", "program end");
+	printf("%s\n", "program ends");
 	pthread_mutex_destroy(&mutex_pipe);
 	pthread_mutex_destroy(&mutex_task);
 	pthread_exit(NULL);
