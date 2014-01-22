@@ -10,7 +10,8 @@
 #include <errno.h>
 
 #define MAXDATASIZE 100000
-#define NUMTHREADS 1
+#define NUMTHREADS 10
+#define NUMFD 200
 
 //need a lock
 int fd[2];
@@ -42,12 +43,16 @@ struct task * getTask(){
 	struct task *currPtr = taskList;
 	struct task *prevPtr = taskList;
 	if(currPtr){
+		taskList = currPtr->next;
+		return currPtr;
+		/*
 		while(currPtr->next){
 			prevPtr = currPtr;
 			currPtr = currPtr-> next;
 		}
 		prevPtr->next = NULL;
 		return currPtr;
+		*/
 	}else{
 		return NULL;
 	}
@@ -57,7 +62,6 @@ struct task * getTask(){
 /* this function adds a new task to the taskList */
 
 void addTask(int adding_sock, char* adding_fName){ 
-	struct task *headPtr = taskList;
 	struct task *newTaskPtr;
 	newTaskPtr = (struct task *) malloc(sizeof(struct task));
 	newTaskPtr->sock = adding_sock;
@@ -72,7 +76,7 @@ void addTask(int adding_sock, char* adding_fName){
 void printTasks(){
 	struct task *ptr = taskList;
 	printf("starting task list:---\n");
-	while(ptr!=NULL){
+	while(ptr != NULL){
 		printf("task for fName %s\n", ptr->fName);
 		ptr = ptr->next;
 	}
@@ -93,17 +97,20 @@ void* worker(void * ptr)
 		pthread_cond_wait(&cv_task, &mutex_task);
 		//check if there is something to do
 		printf("tp: waking up!!!\n");
-		//printTasks(); 
+		printTasks(); 
 		if(taskList){ //yes, get the task
 			current_task = getTask();
 			if(!current_task){
 				continue;
 			}
 			pthread_mutex_unlock (&mutex_task); //finished accessing tasklist, release the lock
-			//if(taskList){ //check it again to see if there is still something else to do. if yes, send signal to other threads
-			//	pthread_cond_signal(&cv_task);
-			//}			
+			/*
+			if(taskList){ //check it again to see if there is still something else to do. if yes, send signal to other threads
+				pthread_cond_signal(&cv_task);
+			}
+			*/			
 		}else{ // no, keep sleeping
+			printf("sleeping...\n");
 			continue;
 		}
 
@@ -111,8 +118,6 @@ void* worker(void * ptr)
 		printf("starting thread for %d\n", current_task->sock);
 		sleep(5);
 
-		/* reset message */
-		message[0] = '\0';
 		printf("tp0\n");
 		FILE *fp;
 		fp=fopen(current_task->fName, "r");
@@ -148,10 +153,13 @@ void* worker(void * ptr)
 			pthread_mutex_unlock (&mutex_pipe);
 			free(message);
 			free(current_task);
-			printf("after unlock\n");
 		}else{
 			printf("tp no file\n");
-			write(fd[1],'\0',1);
+			pthread_mutex_lock (&mutex_pipe);
+			out_sock = current_task->sock;
+			write(fd[1],"no\0",3);
+			pthread_mutex_unlock (&mutex_pipe);
+			free(message);
 			free(current_task);
 		}
 	}
@@ -159,9 +167,7 @@ void* worker(void * ptr)
 	pthread_exit(0);
 }
 
-/**
- * Set a file descriptor to non-blocking mode.
- */
+/* Set a file descriptor to non-blocking mode. */
 int setnonblock(int fd)
 {
 	int flags;
@@ -184,7 +190,7 @@ int main(int argc, char ** argv)
 	socklen_t addr_size;
 	int port;
 	char host_address[80];
-	struct pollfd ufds[200];
+	struct pollfd ufds[NUMFD];
 	char buf1[MAXDATASIZE], buf2[MAXDATASIZE];
 	int rv;
 	int nfds = 2, current_size = 0, len = 1, i = 0, j = 0, n = 0;
@@ -282,6 +288,8 @@ int main(int argc, char ** argv)
 		printf("%s\n", "--------");
 
 		if(taskList){
+			printf("send signal to wake up thread\n");
+			//sleep(1);
 			pthread_cond_signal(&cv_task);
 		}
 
@@ -332,7 +340,12 @@ int main(int argc, char ** argv)
 			    	if ((n = read(ufds[i].fd, buf1, MAXDATASIZE)) >= 0) {
 			    		buf1[n] = 0;	// terminate the string
 			    		printf("read %d bytes from the pipe: \"%s\"\n", n, buf1);
-						rv = send(out_sock, buf1, n+1, MSG_NOSIGNAL);
+			    		if(n>3){
+							rv = send(out_sock, buf1, n+1, MSG_NOSIGNAL);			    			
+			    		}else{
+			    			printf("file not exist\n");
+			    		}
+
 			    	}
 			    	printf("outgoing socket: %d\n", out_sock);
 			        close(out_sock);
@@ -371,19 +384,12 @@ int main(int argc, char ** argv)
 			        printf( "%s\n", buf2);
 
 			        /* add a new task to the taskList, and send the signal to the threads for them to work */
-			        //pthread_mutex_lock (&mutex_task);
 			        addTask(ufds[i].fd, buf2);
-			        //pthread_mutex_unlock (&mutex_task);
-			        //printf("tp signal thread\n");
-			        /*
-			        if(taskList){
-			        	pthread_cond_signal(&cv_task);
-			        }
-					*/
+
 			        if (close_conn){
-			          close(ufds[i].fd);
-			          ufds[i].fd = -1;
-			          compress_array = 1;
+			          	close(ufds[i].fd);
+			          	ufds[i].fd = -1;
+			          	compress_array = 1;
 			    	}
 			    	break;
 			    }
@@ -395,7 +401,7 @@ int main(int argc, char ** argv)
 	  		for (i = 0; i < nfds; i++){
 	    		if (ufds[i].fd == -1){
 	    			for(j = i; j < nfds; j++){
-	      			ufds[j].fd = ufds[j+1].fd;
+	      				ufds[j].fd = ufds[j+1].fd;
 	    			}
 	    			nfds--;
 	    		}
@@ -405,6 +411,8 @@ int main(int argc, char ** argv)
 
 
 	}
+
+	/* closing the program */
 	printf("%s\n", "program end");
 	pthread_mutex_destroy(&mutex_pipe);
 	pthread_mutex_destroy(&mutex_task);
